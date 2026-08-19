@@ -15,8 +15,8 @@ if [ -d /usr/local/lib/dinit.d/ ]; then
 else
     _usr_dinit_services_path=""
 fi
-if [ -d $HOME/.config/dinit.d/ ]; then
-    _dinit_user_services_path="$HOME/.config/dinit.d/"
+if [ -d /etc/dinit.d/user/ ]; then
+    _dinit_user_services_path="/etc/dinit.d/user/"
 else
     _dinit_user_services_path=""
 fi
