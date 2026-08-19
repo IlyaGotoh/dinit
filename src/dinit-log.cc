@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
+#include <ctime>
 
 #include "dasynq.h"
 
@@ -31,6 +32,8 @@ static_assert(DLOG_NUM == 2, "number of log streams has changed");
 
 bool console_service_status = true;  // always show service status messages to console?
 
+static time_t unix_time_now;
+static char time_buffer[20];
 
 dasynq::time_val release_time; // time the log was released
 
@@ -469,7 +472,10 @@ template <typename ... T> static void do_log_main(loglevel_t lvl, T ... args) no
         push_to_log(DLOG_MAIN, mark.buf, args...);
     }
     else {
-        push_to_log(DLOG_MAIN, args...);
+		unix_time_now = std::time(0);
+		std::strftime(time_buffer, sizeof(time_buffer), "%F %T",
+			std::localtime(&unix_time_now));
+        push_to_log(DLOG_MAIN, "[", time_buffer, "] ", args...);
     }
 }
 
