@@ -431,13 +431,17 @@ template <typename ... T> static void do_log(loglevel_t lvl, bool to_cons, T ...
     log_current_line[DLOG_MAIN] = (lvl >= log_level[DLOG_MAIN]);
     push_to_log(DLOG_CONS, args...);
     
+	unix_time_now = std::time(0);
+	std::strftime(time_buffer, sizeof(time_buffer), "%F %T",
+		std::localtime(&unix_time_now));
+
     if (log_current_line[DLOG_MAIN]) {
         if (log_format_syslog[DLOG_MAIN]) {
             ll_marker mark(LOG_DAEMON | log_level_to_syslog_level(lvl));
-            push_to_log(DLOG_MAIN, mark.buf, args...);
+            push_to_log(DLOG_MAIN, mark.buf, "[", time_buffer, "] ", args...);
         }
         else {
-            push_to_log(DLOG_MAIN, args...);
+            push_to_log(DLOG_MAIN, "[", time_buffer, "] ", args...);
         }
     }
 }
@@ -467,14 +471,15 @@ template <typename ... T> static void do_log_main(loglevel_t lvl, T ... args) no
     log_current_line[DLOG_CONS] = false;
     log_current_line[DLOG_MAIN] = true;
 
+	unix_time_now = std::time(0);
+	std::strftime(time_buffer, sizeof(time_buffer), "%F %T",
+		std::localtime(&unix_time_now));
+
     if (log_format_syslog[DLOG_MAIN]) {
         ll_marker mark(LOG_DAEMON | log_level_to_syslog_level(lvl));
-        push_to_log(DLOG_MAIN, mark.buf, args...);
+        push_to_log(DLOG_MAIN, mark.buf, "[", time_buffer, "] ", args...);
     }
     else {
-		unix_time_now = std::time(0);
-		std::strftime(time_buffer, sizeof(time_buffer), "%F %T",
-			std::localtime(&unix_time_now));
         push_to_log(DLOG_MAIN, "[", time_buffer, "] ", args...);
     }
 }
