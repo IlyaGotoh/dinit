@@ -572,12 +572,12 @@ void log_service_started(const char *service_name) noexcept
 void log_service_failed(const char *service_name, bool dep_failed) noexcept
 {
     loglevel_t cons_lvl = dep_failed ? loglevel_t::WARN : loglevel_t::ERROR;
-    do_log_cons(cons_lvl, "[     \x1B[0;31m{\x1B[0;1;31mx\x1B[0;31m}\x1B[0m] ", service_name, "\n");
+    do_log_cons(cons_lvl, "[     \x1B[0;31m{\x1B[0;1;31mX\x1B[0;31m}\x1B[0m] ", service_name, "\n");
     do_log_main(loglevel_t::ERROR, "dinit: service ", service_name, " failed to start.\n");
 }
 
 void log_service_stopped(const char *service_name) noexcept
 {
-    do_log_cons(loglevel_t::NOTICE, "[     {\x1B[0;1;37mx\x1B[0m}] ", service_name, "\n");
+    do_log_cons(loglevel_t::NOTICE, "[     {\x1B[0;1;37m-\x1B[0m}] ", service_name, "\n");
     do_log_main(loglevel_t::NOTICE, "dinit: service ", service_name, " stopped.\n");
 }

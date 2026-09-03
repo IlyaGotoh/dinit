@@ -1515,14 +1515,18 @@ static int list_services(dinit_conn_t &dinit_conn, uint16_t proto_version)
         //  +  if started, 's' if skipped, space otherwise
         char lbracket = target == service_state_t::STARTED ? '{' : ' ';
         char rbracket = target == service_state_t::STARTED ? '}' : ' ';
-        cout << (marked_active ? '[' : lbracket);
+        cout << "\x1B[0;32m" << (marked_active ? '[' : lbracket) << "\x1B[0m";
         if (current == service_state_t::STARTED) {
-            cout << (was_skipped ? 's' : '+');
+			if (was_skipped) {
+				cout << "\x1B[0;1;37m" << "s" << "\x1B[0m";
+			} else {
+				cout << "\x1B[0;1;32m" << "+" << "\x1B[0m";
+			}
         }
         else {
             cout << ' ';
         }
-        cout << (marked_active ? ']' : rbracket);
+        cout << "\x1B[0;32m" << (marked_active ? ']' : rbracket) << "\x1B[0m";
         
         if (current == service_state_t::STARTING) {
             cout << "<<";
@@ -1534,7 +1538,11 @@ static int list_services(dinit_conn_t &dinit_conn, uint16_t proto_version)
             cout << "  ";
         }
         
-        cout << (target == service_state_t::STOPPED ? '{' : ' ');
+		if (target != service_state_t::STOPPED) {
+			cout << " ";
+		} else if (target == service_state_t::STOPPED && current != service_state_t::STOPPED) {
+			cout << "{";
+		}
         if (current == service_state_t::STOPPED) {
             bool did_fail = false;
             if (stop_reason == stopped_reason_t::TERMINATED) {
@@ -1551,12 +1559,20 @@ static int list_services(dinit_conn_t &dinit_conn, uint16_t proto_version)
                 did_fail = (stop_reason != stopped_reason_t::NORMAL);
             }
 
-            cout << (did_fail ? 'X' : '-');
+			if (did_fail) {
+				cout << "\x1B[0;31m" << "{" << "\x1B[0;1;31m" << "X" << "\x1B[0;31m" << "}" << "\x1B[0m";
+			} else {
+				cout << "{" << "\x1B[0;1;37m" << "-" << "\x1B[0m" << "}";
+			}
         }
         else {
             cout << ' ';
         }
-        cout << (target == service_state_t::STOPPED ? '}' : ' ');
+		if (target != service_state_t::STOPPED) {
+			cout << " ";
+		} else if (target == service_state_t::STOPPED && current != service_state_t::STOPPED) {
+			cout << "{";
+		}
 
         cout << "] " << name;
 
