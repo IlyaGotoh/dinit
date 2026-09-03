@@ -1515,18 +1515,24 @@ static int list_services(dinit_conn_t &dinit_conn, uint16_t proto_version)
         //  +  if started, 's' if skipped, space otherwise
         char lbracket = target == service_state_t::STARTED ? '{' : ' ';
         char rbracket = target == service_state_t::STARTED ? '}' : ' ';
-        cout << "\x1B[0;32m" << (marked_active ? '[' : lbracket) << "\x1B[0m";
+		if (current == service_state_t::STARTED) {
+			cout << "\x1B[0;32m";
+		}
+        cout << (marked_active ? '[' : lbracket);
         if (current == service_state_t::STARTED) {
 			if (was_skipped) {
-				cout << "\x1B[0;1;37m" << "s" << "\x1B[0m";
+				cout << "\x1B[0;1;37m" << "s";
 			} else {
-				cout << "\x1B[0;1;32m" << "+" << "\x1B[0m";
+				cout << "\x1B[0;1;32m" << "+";
 			}
         }
         else {
             cout << ' ';
         }
-        cout << "\x1B[0;32m" << (marked_active ? ']' : rbracket) << "\x1B[0m";
+		if (current == service_state_t::STARTED) {
+        	cout << "\x1B[0;32m";
+		}
+		cout << (marked_active ? ']' : rbracket) << "\x1B[0m";
         
         if (current == service_state_t::STARTING) {
             cout << "<<";
@@ -1571,7 +1577,7 @@ static int list_services(dinit_conn_t &dinit_conn, uint16_t proto_version)
 		if (target != service_state_t::STOPPED) {
 			cout << " ";
 		} else if (target == service_state_t::STOPPED && current != service_state_t::STOPPED) {
-			cout << "{";
+			cout << "}";
 		}
 
         cout << "] " << name;
