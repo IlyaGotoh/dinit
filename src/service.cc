@@ -322,13 +322,13 @@ void service_record::do_propagation() noexcept
 void service_record::execute_transition() noexcept
 {
     if (service_state == service_state_t::STARTING) {
-        if (check_deps_started()) {
+        if (!waiting_for_deps || check_deps_started()) {
             waiting_for_deps = false;
             all_deps_started();
         }
     }
     else if (service_state == service_state_t::STOPPING) {
-        if (stop_check_dependents()) {
+        if (!waiting_for_deps || stop_check_dependents()) {
             waiting_for_deps = false;
             if (onstart_flags.kill_all_on_stop) {
                 log(loglevel_t::NOTICE, true, "Sending TERM/KILL to all processes...\n");
@@ -420,10 +420,10 @@ bool service_record::start_check_dependencies() noexcept
         }
     }
 
-    for (auto * dept : dependents) {
+    for (auto *dept : dependents) {
         if (!dept->waiting_on && dept->is_only_ordering()) {
             service_record *from = dept->get_from();
-            if (from->get_state() == service_state_t::STARTING) {
+            if (from->get_state() == service_state_t::STARTING && from->waiting_for_deps) {
                 dept->waiting_on = true;
             }
         }
@@ -445,12 +445,12 @@ bool service_record::check_deps_started() noexcept
 
 void service_record::all_deps_started() noexcept
 {
+    waiting_for_deps = false;
+
     if (onstart_flags.starts_on_console && !have_console) {
         queue_for_console();
         return;
     }
-
-    waiting_for_deps = false;
 
     if (!bring_up()) {
         service_state = service_state_t::STOPPING;
@@ -657,6 +657,8 @@ void service_record::do_stop(bool with_restart) noexcept
     // Note: to inhibit automatic restart, including restart due to dependent still requiring this
     //       service, caller must first set desired_state to STOPPED
 
+	// Precondtion: service state is not already STOPPED
+
     if (is_start_pinned()) return;
 
     in_auto_restart = false;
@@ -701,40 +703,35 @@ void service_record::do_stop(bool with_restart) noexcept
 
     bool all_deps_stopped = stop_dependents(for_restart, restart_deps);
 
-    if (service_state != service_state_t::STARTED) {
-        if (service_state == service_state_t::STARTING) {
-            // If waiting for a dependency, or waiting for the console, we can interrupt start. Otherwise,
-            // we need to delegate to can_interrupt_start() (which can be overridden).
-            if (!waiting_for_deps && !waiting_for_console) {
-                if (!can_interrupt_start()) {
-                    // Well this is awkward: we're going to have to continue starting. We can stop once
-                    // we've reached the started state.
-                    return;
-                }
+    if (service_state == service_state_t::STOPPING) return;
 
-                if (!interrupt_start()) {
-                    // Now wait for service startup to actually end; we don't need to handle it here.
-                    notify_listeners(service_event_t::STARTCANCELLED);
-                    return;
-                }
-            }
-            else if (waiting_for_console) {
-                services->unqueue_console(this);
-                waiting_for_console = false;
-            }
+	if (service_state == service_state_t::STARTING) {
+		// If waiting for a dependency, or waiting for the console, we can interrupt start. Otherwise,
+		// we need to delegate to can_interrupt_start() (which can be overridden).
+		if (!waiting_for_deps && !waiting_for_console) {
+			if (!can_interrupt_start()) {
+				// Well this is awkward: we're going to have to continue starting. We can stop once
+				// we've reached the started state.
+				return;
+			}
 
-            // We must have had desired_state == STARTED.
-            notify_listeners(service_event_t::STARTCANCELLED);
+			if (!issue_start_interrupt()) {
+				// Now wait for service startup to actually end; we don't need to handle it here.
+				notify_listeners(service_event_t::STARTCANCELLED);
+				return;
+			}
+		}
+		else if (waiting_for_console) {
+			services->unqueue_console(this);
+			waiting_for_console = false;
+		}
 
-            // Reaching this point, we are starting interruptibly - so we
-            // stop now (by falling through to below).
-        }
-        else {
-            // If we're starting we need to wait for that to complete.
-            // If we're already stopping/stopped there's nothing to do.
-            return;
-        }
-    }
+		// We must have had desired_state == STARTED.
+		notify_listeners(service_event_t::STARTCANCELLED);
+
+		// Reaching this point, we are starting interruptibly - so we
+		// stop now (by falling through to below).
+	}
 
     service_state = service_state_t::STOPPING;
     waiting_for_deps = !all_deps_stopped;
@@ -780,7 +777,7 @@ bool service_record::stop_dependents(bool for_restart, bool restart_deps) noexce
                 // If this service is to be forcefully stopped, dependents must also be.
                 if (desired_state == service_state_t::STOPPED) {
                     // If our target state was forced to STOPPED, this is a failure
-                    dep_from->stop_reason = stopped_reason_t::DEPFAILED;
+                    dep_from->stop_reason = stopped_reason_t::DEPFAILED; // FIXME is it really though?
                     dep_from->unrecoverable_stop();
                 }
                 else {
@@ -885,15 +882,17 @@ void service_record::unpin() noexcept
     }
     if (pinned_stopped) {
         pinned_stopped = false;
-        // We don't need to check state. If we're pinned stopped we can't be required and so desired
-        // state should always be stopped.
+        // We don't need to check state. If we're pinned stopped we can't be explicitly activated
+        // and so desired state should always be stopped.
     }
 }
 
 void service_record::queue_for_console() noexcept
 {
-    waiting_for_console = true;
-    services->append_console_queue(this);
+    if (!waiting_for_console) {
+        waiting_for_console = true;
+        services->append_console_queue(this);
+    }
 }
 
 void service_record::release_console() noexcept
@@ -902,7 +901,7 @@ void service_record::release_console() noexcept
     services->pull_console_queue();
 }
 
-bool service_record::interrupt_start() noexcept
+bool service_record::issue_start_interrupt() noexcept
 {
     return true;
 }

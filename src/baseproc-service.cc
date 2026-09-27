@@ -401,12 +401,12 @@ bool base_process_service::restart_ps_process() noexcept
     return true;
 }
 
-bool base_process_service::interrupt_start() noexcept
+bool base_process_service::issue_start_interrupt() noexcept
 {
     if (waiting_restart_timer) {
         process_timer.stop_timer(event_loop);
         waiting_restart_timer = false;
-        return service_record::interrupt_start();
+        return service_record::issue_start_interrupt();
     }
     else {
         log(loglevel_t::WARN, "Interrupting start of service ", get_name(), " with pid ", pid,
@@ -414,10 +414,12 @@ bool base_process_service::interrupt_start() noexcept
         kill_pg(SIGINT);
 
         if (stop_timeout != time_val(0,0)) {
+            // Arm the stop/start timer for stop
             process_timer.arm_timer_rel(event_loop, stop_timeout);
             waiting_stopstart_timer = true;
         }
         else if (waiting_stopstart_timer) {
+            // Start timer was running but is no longer required
             process_timer.stop_timer(event_loop);
             waiting_stopstart_timer = false;
         }
@@ -484,7 +486,7 @@ void base_process_service::timer_expired() noexcept
 void base_process_service::start_timed_out() noexcept
 {
     // Starting, start timed out.
-    interrupt_start();
+    issue_start_interrupt();
     stop_reason = stopped_reason_t::TIMEDOUT;
     failed_to_start(false, false);
 }

@@ -124,10 +124,11 @@
  * or STOPPED (that happens in the execution phase).
  *
  * The two-phase transition is needed to avoid problem where a service that becomes STOPPED has
- * an incorrect acquisition count, which may cause it to restart when it should not. The
- * propagation phase allows the acquisition count to settle before the transition to the STOPPED
- * state occurs, and the decision whether to restart can then be made based on the (correct)
- * acquisition count. See "acquisition/release" above for details of when this can occur.
+ * an incorrect acquisition count (due to dependents which will stop in the same phase, but have
+ * not yet stopped), which may cause it to restart when it should not. The propagation phase
+ * allows the acquisition count to settle before the transition to the STOPPED state occurs, and
+ * the decision whether to restart can then be made based on the (correct) acquisition count. See
+ * "acquisition/release" above for details of when this can occur.
  *
  * Propagation variables:
  *   prop_acquire:  the service has transitioned to an acquired state and must issue an acquire
@@ -285,8 +286,8 @@ class service_record
     bool pinned_started : 1;
     bool dept_pinned_started : 1; // pinned started due to dependent
 
-    bool waiting_for_deps : 1;  // if STARTING, whether we are waiting for dependencies/console
-                                // if STOPPING, whether we are waiting for dependents to stop
+    bool waiting_for_deps : 1;  // if STARTING, whether we are waiting for dependencies to start;
+                                // if STOPPING, whether we are waiting for dependents to stop.
     bool waiting_for_console : 1;   // waiting for exclusive console access (while STARTING)
     bool have_console : 1;      // whether we have exclusive console access (STARTING/STARTED)
     bool waiting_for_execstat : 1;  // if we are waiting for exec status after fork()
@@ -381,7 +382,7 @@ class service_record
     // Whether a STOPPING service can immediately transition to STARTED.
     bool can_interrupt_stop() noexcept
     {
-        return waiting_for_deps && ! force_stop;
+        return waiting_for_deps && !force_stop;
     }
 
     // A dependent has reached STOPPED state
@@ -410,7 +411,7 @@ class service_record
     
     void notify_listeners(service_event_t event) noexcept
     {
-        for (auto l : listeners) {
+        for (auto *l : listeners) {
             l->service_event(this, event);
         }
     }
@@ -428,7 +429,10 @@ class service_record
     // Called on transition of desired state from stopped to started (or unpinned stop)
     void do_start() noexcept;
 
-    // Begin stopping, release activation.
+    // Initiate a definite stop, and release explicit activation, with optional (user-requested)
+    // restart. Note that A service that stops may restart automatically if it or a dependent is
+    // configured to do so, regardless of with_restart. Precondition: the state is not already
+    // STOPPED.
     void do_stop(bool with_restart = false) noexcept;
 
     // Set the service state
@@ -452,17 +456,25 @@ class service_record
     // All dependents have stopped, and this service should proceed to stop.
     virtual void bring_down() noexcept;
 
-    // Whether a STARTING service can immediately transition to STOPPED (as opposed to
-    // having to wait for it reach STARTED and then go through STOPPING). Note that the
-    // waiting_for_deps flag being set may override this check.
+    // Whether a STARTING service can have its startup interrupted, either immediately or via an
+    // external signal.
+    //
+    // The waiting_for_deps/waiting_for_console flags being set override this check, i.e. it can
+    // be assumed that a service with waiting_for_deps can be transitioned without any other
+    // action and a service with waiting_for_console can be transitioned after removing from the
+    // console queue. These flags should always be checked before calling can_interrupt_start().
+    //
+    // If this function returns true, start can be interrupted by calling issue_start_interrupt().
     virtual bool can_interrupt_start() noexcept
     {
-        return waiting_for_deps;
+        return false;
     }
 
-    // Interrupt startup. Returns true if service start is fully cancelled; returns false if cancel order
-    // issued but service has not yet responded (state will be set to STOPPING).
-    virtual bool interrupt_start() noexcept;
+    // Interrupt startup. Returns true if service start is fully cancelled (state will NOT be
+    // changed and will remain as STARTING in this case); returns false if cancel order issued but
+    // service has not yet responded (state will be set to STOPPING). This must only be called if
+    // can_interrupt_start() returned true.
+    virtual bool issue_start_interrupt() noexcept;
 
     // The service is becoming inactive - i.e. it has stopped and will not be immediately restarted. Perform
     // any appropriate cleanup.
