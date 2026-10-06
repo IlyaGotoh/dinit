@@ -24,7 +24,6 @@ void base_process_service::do_smooth_recovery() noexcept
 {
     if (!restart_ps_process()) {
         unrecoverable_stop();
-        services->process_queues();
     }
 }
 
@@ -84,6 +83,7 @@ void base_process_service::handle_unexpected_termination() noexcept
         // We must be waiting for dependents;
         // If we're going to restart, we can kick that off now:
         if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
+            force_stop = false;
             initiate_start();
             services->process_queues();
         }
