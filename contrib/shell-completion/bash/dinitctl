@@ -17,6 +17,9 @@ else
 fi
 if [ -d /etc/dinit.d/user/ ]; then
     _dinit_user_services_path="/etc/dinit.d/user/"
+	if [ -d /home/$USER/.config/dinit.d/ ]; then
+		_dinit_user_services_path="$_dinit_user_services_path /home/$USER/.config/dinit.d/"
+	fi
 else
     _dinit_user_services_path=""
 fi
@@ -24,7 +27,7 @@ fi
 _dinit_all_services() {
     for path in $_etc_dinit_services_path $_usr_dinit_services_path\
                 $_lib_dinit_services_path $_dinit_user_services_path; do
-        ls $path
+	ls -p $path | grep -v "/"
     done
 }
 
