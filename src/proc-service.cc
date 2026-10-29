@@ -34,7 +34,7 @@ std::vector<const char *> separate_args(ha_string &s,
     }
 
     // Now we can get the C string (c_str) and store offsets into it:
-    const char * cstr = s.c_str();
+    const char *cstr = s.c_str();
     for (auto index_pair : arg_indices) {
         r.push_back(cstr + index_pair.first);
     }
@@ -102,9 +102,9 @@ rearm exec_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) n
     sr->waiting_for_execstat = false;
 
     run_proc_err exec_status;
-    int r = read(get_watched_fd(), &exec_status, sizeof(exec_status));
+    int r = bp_sys::read(fd, &exec_status, sizeof(exec_status));
     deregister(loop);
-    close(get_watched_fd());
+    bp_sys::close(fd);
 
     if (r > 0) {
         // We read an errno code; exec() failed, and the service startup failed.
@@ -140,9 +140,9 @@ rearm stop_status_pipe_watcher::fd_event(eventloop_t &loop, int fd, int flags) n
     sr->waiting_for_execstat = false;
 
     run_proc_err exec_status;
-    int r = read(get_watched_fd(), &exec_status, sizeof(exec_status));
+    int r = bp_sys::read(fd, &exec_status, sizeof(exec_status));
     deregister(loop);
-    close(get_watched_fd());
+    bp_sys::close(fd);
 
     if (r > 0) {
         // We read an errno code; exec() failed, and the service startup failed.
@@ -185,25 +185,29 @@ rearm ready_notify_watcher::fd_event(eventloop_t &, int fd, int flags) noexcept
         // can we actually read anything from the notification pipe?
         int r = bp_sys::read(fd, buf, sizeof(buf));
         if (r > 0) {
-            if (service->waiting_stopstart_timer) {
-                service->process_timer.stop_timer(event_loop);
-                service->waiting_stopstart_timer = false;
+            if (memchr(buf, '\n', r) != nullptr) {
+                if (service->waiting_stopstart_timer) {
+                    service->process_timer.stop_timer(event_loop);
+                    service->waiting_stopstart_timer = false;
+                }
+                service->doing_smooth_recovery = false;
+                service->started();
             }
-            service->doing_smooth_recovery = false;
-            service->started();
         }
-        else if (r == 0 || errno != EAGAIN) {
+        else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+            // Notification pipe closed before ready notification sent
+            log(loglevel_t::ERROR, "Service ", service->get_name(),
+                    ": readiness pipe not readable: ", strerror(errno));
             if (service->waiting_stopstart_timer) {
                 service->process_timer.stop_timer(event_loop);
                 service->waiting_stopstart_timer = false;
             }
             if (service->doing_smooth_recovery) {
                 service->doing_smooth_recovery = false;
-                service->stop_reason = stopped_reason_t::TERMINATED;
-                service->unrecoverable_stop();
+                service->hard_failure();
             }
             else {
-                service->set_state(service_state_t::STOPPING);
+                service->stop_reason = stopped_reason_t::FAILED;
                 service->failed_to_start(false, false);
                 service->bring_down();
             }
@@ -228,8 +232,7 @@ void process_service::start_timed_out() noexcept
 {
     if (doing_smooth_recovery) {
         doing_smooth_recovery = false;
-        issue_start_interrupt();
-        unrecoverable_stop();
+        hard_failure();
     }
     else {
         base_process_service::start_timed_out();
@@ -252,11 +255,6 @@ dasynq::rearm service_child_watcher::status_change(eventloop_t &loop, pid_t chil
     // (stop_watch instead of deregister, so that we hold watch reservation).
     stop_watch(loop);
 
-    if (sr->waiting_stopstart_timer) {
-        sr->process_timer.stop_timer(loop);
-        sr->waiting_stopstart_timer = false;
-    }
-
     if (sr->waiting_for_execstat) {
         // We still don't have an exec() status from the forked child, wait for that
         // before doing any further processing.
@@ -264,6 +262,7 @@ dasynq::rearm service_child_watcher::status_change(eventloop_t &loop, pid_t chil
     }
 
     sr->handle_exit_status();
+    sr->services->process_queues();
     return dasynq::rearm::NOOP;
 }
 
@@ -366,12 +365,8 @@ void process_service::handle_exit_status() noexcept
         }
     }
 
-    if (doing_smooth_recovery) {
-        // If doing smooth recovery (state STARTED), treat it the same as STARTING
-        current_state = service_state_t::STARTING;
-    }
-
-    if (waiting_stopstart_timer) {
+    // We've stopped, unless a stop command is running (stop_pid != -1)
+    if (waiting_stopstart_timer && stop_pid == -1) {
         process_timer.stop_timer(event_loop);
         waiting_stopstart_timer = false;
     }
@@ -382,38 +377,44 @@ void process_service::handle_exit_status() noexcept
     }
 #endif
 
-    if (current_state == service_state_t::STARTING) {
+    if (doing_smooth_recovery) {
+        // Must have been waiting for readiness (state STARTED), but terminated before readiness
+        // was signalled. We'll treat it as a hard error.
+        hard_failure();
+    }
+    else if (current_state == service_state_t::STARTING) {
         // If state is STARTING, we must be waiting for readiness notification; the process has
         // terminated before becoming ready.
-        if (doing_smooth_recovery) {
-            stop_reason = stopped_reason_t::TERMINATED;
-            unrecoverable_stop();
-        }
-        else {
-            stop_reason = stopped_reason_t::FAILED;
-            failed_to_start();
-        }
+        stop_reason = stopped_reason_t::FAILED;
+        failed_to_start();
     }
     else if (current_state == service_state_t::STOPPING) {
-        // We won't log a non-zero exit status or termination due to signal here -
-        // we assume that the process died because we signalled it.
-        if (waiting_stopstart_timer) {
-            process_timer.stop_timer(event_loop);
-        }
-        if (!waiting_for_deps) {
-            if (stop_pid == -1 && !waiting_for_execstat) {
-                stop_issued = false; // reset for next time
-                stopped();
+        if (stop_pid == -1) {
+            if (!waiting_for_deps) {
+                if (!waiting_for_execstat) {
+                    // We won't log a non-zero exit status or termination due to signal here - we
+                    // assume that the process died because we signalled it.
+                    stop_issued = false; // reset for next time
+                    stopped();
+                }
+            }
+            else if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
+                // Stopping and waiting for dependents. We don't actually need to wait, though, we can
+                // just transition back to STARTING immediately (but invoke auto restart delay).
+                stop_reason = stopped_reason_t::TERMINATED;
+                stopped(); // (will transition to started)
             }
         }
-        else if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
-            initiate_start();
-        }
     }
-    else if (smooth_recovery && current_state == service_state_t::STARTED && check_restart()) {
-        // unexpected termination, with smooth recovery
-        doing_smooth_recovery = true;
-        do_smooth_recovery();
+    else if (smooth_recovery && current_state == service_state_t::STARTED) {
+        if (check_restart()) {
+            // unexpected termination, with smooth recovery
+            doing_smooth_recovery = true;
+            do_smooth_recovery();
+        }
+        else {
+            handle_unexpected_termination();
+        }
     }
     else {
         handle_unexpected_termination();
@@ -439,14 +440,12 @@ void process_service::exec_failed(run_proc_err errcode) noexcept
 
     if (get_state() == service_state_t::STARTING) {
         stop_reason = stopped_reason_t::EXECFAILED;
-        set_state(service_state_t::STOPPING);
         failed_to_start();
     }
     else {
         // Process service in smooth recovery:
         doing_smooth_recovery = false;
-        stop_reason = stopped_reason_t::TERMINATED;
-        unrecoverable_stop();
+        hard_failure();
     }
 }
 
@@ -475,7 +474,7 @@ void bgproc_service::handle_exit_status() noexcept
         }
     }
 
-    if (waiting_stopstart_timer) {
+    if (waiting_stopstart_timer && stop_pid == -1) {
         process_timer.stop_timer(event_loop);
         waiting_stopstart_timer = false;
     }
@@ -483,20 +482,19 @@ void bgproc_service::handle_exit_status() noexcept
     if (doing_smooth_recovery) {
         doing_smooth_recovery = false;
 
-        // We're either started, or stopping (i.e. we were requested to stop during smooth recovery).
+        // We're either started, or stopping (i.e. we were requested to stop during smooth
+        // recovery; in this case we need to wait for smooth recovery sequence to complete
+        // before proceeding to stop).
 
         if (current_state == service_state_t::STOPPING) {
             // Stop was issued during smooth recovery
             if ((did_exit && exit_status.get_exit_status() != 0) || was_signalled) {
-                if (!waiting_for_deps) {
-                    stopped();
-                }
-                else if (get_target_state() == service_state_t::STARTED && !pinned_stopped) {
-                    initiate_start();
-                }
+                // ... and smooth recovery failed anyway
+                hard_failure();
             }
             else {
-                // We need to re-read the PID, since it has now changed.
+                // Clean exit: we need to re-read the PID, since it has now changed, then bring
+                // the daemon down to complete the stop.
                 if (pid_file.length() != 0) {
                     auto pid_result = read_pid_file(&exit_status);
 
@@ -509,7 +507,7 @@ void bgproc_service::handle_exit_status() noexcept
                     case pid_result_t::FAILED:
                     case pid_result_t::TERMINATED:
                         // Failed startup: no auto-restart.
-                        stopped();
+                        hard_failure();
                         break;
                     case pid_result_t::OK:
                         // We now need to bring down the daemon process
@@ -546,9 +544,7 @@ void bgproc_service::handle_exit_status() noexcept
 
             if (need_stop) {
                 // Failed startup: no auto-restart.
-                stop_reason = stopped_reason_t::TERMINATED;
-                unrecoverable_stop();
-                services->process_queues();
+                hard_failure();
             }
 
             return;
@@ -613,13 +609,11 @@ void bgproc_service::exec_failed(run_proc_err errcode) noexcept
 
     if (doing_smooth_recovery) {
         doing_smooth_recovery = false;
-        stop_reason = stopped_reason_t::TERMINATED;
-        unrecoverable_stop();
+        hard_failure();
     }
     else {
-        // Only time we execute is for startup:
+        // The only time we execute is for startup (STARTING):
         stop_reason = stopped_reason_t::EXECFAILED;
-        set_state(service_state_t::STOPPING);
         failed_to_start();
     }
 }
@@ -804,7 +798,7 @@ void process_service::bring_down() noexcept
 {
     doing_smooth_recovery = false;
     if (stop_pid != -1 || stop_issued) {
-        // waiting for stop command to complete (or for process to die after it has complete);
+        // waiting for stop command to complete (or for process to die after it has completed);
         // can't do anything here.
         return;
     }
@@ -925,7 +919,7 @@ bool process_service::start_stop_process(const std::vector<const char *> &cmd) n
         return false;
     }
 
-    const char * logfile = this->logfile.c_str();
+    const char *logfile = this->logfile.c_str();
     if (*logfile == 0) {
         logfile = "/dev/null";
     }
@@ -954,7 +948,7 @@ bool process_service::start_stop_process(const std::vector<const char *> &cmd) n
 
     if (forkpid == 0) {
         close(pipefd[0]);
-        const char * working_dir_c = service_dsc_dir;
+        const char *working_dir_c = service_dsc_dir;
         if (!working_dir.empty()) working_dir_c = working_dir.c_str();
         run_proc_params run_params{cmd.data(), working_dir_c, logfile, pipefd[1], run_as_uid, run_as_gid, rlimits};
         run_params.on_console = false;

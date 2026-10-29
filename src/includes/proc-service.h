@@ -104,7 +104,7 @@ class exec_status_pipe_watcher : public eventloop_t::fd_watcher_impl<exec_status
     base_process_service *service;
     dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
 
-    exec_status_pipe_watcher(base_process_service * sr) noexcept : service(sr) { }
+    exec_status_pipe_watcher(base_process_service *sr) noexcept : service(sr) { }
 
     exec_status_pipe_watcher(const exec_status_pipe_watcher &) = delete;
     void operator=(const exec_status_pipe_watcher &) = delete;
@@ -117,7 +117,7 @@ class stop_status_pipe_watcher : public eventloop_t::fd_watcher_impl<stop_status
     process_service *service;
     dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
 
-    stop_status_pipe_watcher(process_service * sr) noexcept : service(sr) { }
+    stop_status_pipe_watcher(process_service *sr) noexcept : service(sr) { }
 
     stop_status_pipe_watcher(const exec_status_pipe_watcher &) = delete;
     void operator=(const exec_status_pipe_watcher &) = delete;
@@ -143,7 +143,7 @@ class service_child_watcher : public eventloop_t::child_proc_watcher_impl<servic
     base_process_service *service;
     dasynq::rearm status_change(eventloop_t &eloop, pid_t child, proc_status_t status) noexcept;
 
-    service_child_watcher(base_process_service * sr) noexcept : service(sr) { }
+    service_child_watcher(base_process_service *sr) noexcept : service(sr) { }
 
     service_child_watcher(const service_child_watcher &) = delete;
     void operator=(const service_child_watcher &) = delete;
@@ -156,7 +156,7 @@ class stop_child_watcher : public eventloop_t::child_proc_watcher_impl<stop_chil
     process_service *service;
     dasynq::rearm status_change(eventloop_t &eloop, pid_t child, proc_status_t status) noexcept;
 
-    stop_child_watcher(process_service * sr) noexcept : service(sr) { }
+    stop_child_watcher(process_service *sr) noexcept : service(sr) { }
 
     stop_child_watcher(const service_child_watcher &) = delete;
     void operator=(const service_child_watcher &) = delete;
@@ -169,7 +169,7 @@ class log_output_watcher : public eventloop_t::fd_watcher_impl<log_output_watche
 
     dasynq::rearm fd_event(eventloop_t &eloop, int fd, int flags) noexcept;
 
-    log_output_watcher(base_process_service * sr) noexcept : service(sr) { }
+    log_output_watcher(base_process_service *sr) noexcept : service(sr) { }
 
     log_output_watcher(const ready_notify_watcher &) = delete;
     void operator=(const ready_notify_watcher &) = delete;
@@ -290,6 +290,10 @@ class base_process_service : public service_record
     // Restart the process (due to start failure or unexpected termination). Restarts will be
     // rate-limited.
     bool restart_ps_process() noexcept;
+
+    // Unrecoverable service failure occurred; for process-based services, the service can be set
+    // as STOPPED immediately (as well as issuing the usual unrecoverable stop to dependents).
+    void hard_failure() noexcept;
 
     // Perform smooth recovery process
     void do_smooth_recovery() noexcept;
@@ -674,8 +678,12 @@ class process_service : public base_process_service
 
         if (pid == -1 || !tracking_child) {
             // If service process has already finished, we were just waiting for the stop command
-            // process:
+            // process to also complete:
             stop_issued = false; // reset for next time
+            if (waiting_stopstart_timer) {
+                waiting_stopstart_timer = false;
+                process_timer.stop_timer(event_loop);
+            }
             stopped();
         }
     }
@@ -694,12 +702,11 @@ class process_service : public base_process_service
                     set_target_state(service_state_t::STOPPED);
                     return false;
                 }
-                ++restart_interval_count;
             }
             else {
                 // Not within the last limiting interval; start a new interval
                 restart_interval_time = current_time;
-                restart_interval_count = 1;
+                restart_interval_count = 0;
             }
         }
 

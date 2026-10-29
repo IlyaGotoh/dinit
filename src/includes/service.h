@@ -350,6 +350,16 @@ class service_record
     // Propagation and start/stop queues
     lls_node<service_record> prop_queue_node;
     lls_node<service_record> stop_queue_node;
+
+    private:
+
+    // Issue a stop to all dependents.
+    // Parameters:
+    //   keep_soft_links - whether to retain dependency links from active soft dependencies
+    //   restart_deps - whether to issue a restart to dependents (user-issued restart)
+    // Returns:
+    //   True if all dependents are stopped, false if some are still stopping
+    bool stop_dependents(bool keep_soft_links, bool restart_deps) noexcept;
     
     protected:
 
@@ -365,7 +375,8 @@ class service_record
     //   immediate_stop: whether to set state as STOPPED and handle complete stop.
     void failed_to_start(bool dep_failed = false, bool immediate_stop = true) noexcept;
     
-    // Service stopped (failed), unrecoverably; dependents should not auto-restart
+    // Service stopped (failed), unrecoverably; dependents should not auto-restart. Acts as
+    // do_stop() with restart inhibited.
     void unrecoverable_stop() noexcept;
 
     // A dependency has reached STARTED state
@@ -391,9 +402,6 @@ class service_record
     // check if all dependents have stopped
     bool stop_check_dependents() noexcept;
     
-    // issue a stop to all dependents, return true if they are all already stopped
-    bool stop_dependents(bool with_restart, bool for_restart) noexcept;
-
     // issue a restart to all hard dependents
     bool restart_dependents() noexcept;
     
@@ -430,9 +438,13 @@ class service_record
     void do_start() noexcept;
 
     // Initiate a definite stop, and release explicit activation, with optional (user-requested)
-    // restart. Note that A service that stops may restart automatically if it or a dependent is
-    // configured to do so, regardless of with_restart. Precondition: the state is not already
-    // STOPPED.
+    // restart. Note that a service that stops may restart automatically if it or a dependent is
+    // configured to do so, regardless of with_restart.
+    //
+    // Stop will be propagated to dependents (via propagation queue). Restart can be inhibited by
+    // setting target state to STOPPED before call.
+    //
+    // Precondition: the state is not already STOPPED.
     void do_stop(bool with_restart = false) noexcept;
 
     // Set the service state
@@ -1230,7 +1242,7 @@ class service_set
             enable_console_log(true);
         }
         else {
-            service_record * front = console_queue.pop_front();
+            service_record *front = console_queue.pop_front();
             front->acquired_console();
         }
     }

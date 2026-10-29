@@ -9,6 +9,7 @@ class test_service : public service_record
 {
     public:
     bool bring_up_reqd = false;
+    bool bring_down_reqd = false;
     bool start_interruptible = false;
 
     test_service(service_set *set, std::string name, service_type_t type_p,
@@ -31,7 +32,7 @@ class test_service : public service_record
     // All dependents have stopped.
     virtual void bring_down() noexcept override
     {
-        waiting_for_deps = false;
+        bring_down_reqd = true;
         if (auto_stop) {
             stopped();
         }
@@ -40,6 +41,9 @@ class test_service : public service_record
     void stopped() noexcept
     {
         assert(get_state() != service_state_t::STOPPED);
+        assert(bring_down_reqd);
+        assert(!waiting_for_deps);
+        bring_down_reqd = false;
         service_record::stopped();
     }
 
@@ -61,6 +65,43 @@ class test_service : public service_record
 
     void failed_to_start() noexcept
     {
+        stop_reason = stopped_reason_t::FAILED;
         service_record::failed_to_start();
+    }
+
+    void failed() noexcept
+    {
+        stop_reason = stopped_reason_t::TERMINATED;
+        forced_stop();
+    }
+};
+
+// Service listener for use in tests
+class test_listener : public service_listener
+{
+    public:
+    bool got_started = false;
+    bool got_stopped = false;
+    bool start_cancelled = false;
+    bool stop_cancelled = false;
+
+    void service_event(service_record * service, service_event_t event) noexcept override
+    {
+        switch (event) {
+        case service_event_t::STARTED:
+            got_started = true;
+            break;
+        case service_event_t::STOPPED:
+            got_stopped = true;
+            break;
+        case service_event_t::STARTCANCELLED:
+            start_cancelled = true;
+            break;
+        case service_event_t::STOPCANCELLED:
+            stop_cancelled = true;
+            break;
+        case service_event_t::FAILEDSTART:
+            break;
+        }
     }
 };

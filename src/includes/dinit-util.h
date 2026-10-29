@@ -54,6 +54,13 @@ value_cls<T> value(const T &v)
     return value_cls<T>(v);
 }
 
+// Get the number of elements in an array. (Once C++17, we can use std::size(...)).
+template <class T, std::size_t N>
+constexpr size_t array_size(const T (&)[N])
+{
+    return N;
+}
+
 // Since we are C++11, we don't have a std::string_view.
 class string_view
 {
@@ -215,9 +222,9 @@ class fd_holder
 
 // Complete read - read the specified size until end-of-file or error; continue read if
 // interrupted by signal.
-inline ssize_t complete_read(int fd, void * buf, size_t n)
+inline ssize_t complete_read(int fd, void *buf, size_t n)
 {
-    char * cbuf = static_cast<char *>(buf);
+    char *cbuf = static_cast<char *>(buf);
     ssize_t r = 0;
     while ((size_t)r < n) {
         ssize_t res = bp_sys::read(fd, cbuf + r, n - r);
@@ -361,8 +368,8 @@ inline string_view parent_path(string_view p)
 // Find the base name of a path (the name after the final '/').
 inline const char *base_name(const char *path) noexcept
 {
-    const char * basen = path;
-    const char * s = path;
+    const char *basen = path;
+    const char *s = path;
     while (*s != 0) {
         if (*s == '/') basen = s + 1;
         s++;

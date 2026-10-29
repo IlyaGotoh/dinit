@@ -239,7 +239,7 @@ class service_description_exc : public service_load_exc
 {
     public:
     file_pos input_pos;
-    const char * const setting_name = nullptr;
+    const char *const setting_name = nullptr;
 
     service_description_exc(const file_pos_ref &input_pos_p, std::string &&exc_info)
             : service_load_exc(std::move(exc_info)), input_pos(input_pos_p)
@@ -520,20 +520,17 @@ inline string read_config_name(string_iterator &i, string_iterator end, bool env
 
 // Read a setting value, with an assignment or plus-assignment (append).
 //
-// In general a setting value is a single-line string. It may contain multiple parts
-// separated by white space (which is normally collapsed). A hash mark - # - denotes
-// the end of the value and the beginning of a comment (it should be preceded by
-// whitespace).
+// In general a setting value is a single-line string. It may contain multiple parts separated by
+// white space (which is normally collapsed). A hash mark - # - denotes the end of the value and
+// the beginning of a comment (it should be preceded by whitespace).
 //
-// Part of a value may be quoted using double quote marks, which prevents collapse
-// of whitespace and interpretation of most special characters (the quote marks will
-// not be considered part of the value). A backslash can precede a character (such
-// as '#' or '"' or another backslash) to remove its special meaning. Newline
-// characters are not allowed in values and cannot be quoted.
+// Part of a value may be quoted using double quote marks, which prevents collapse of whitespace
+// and interpretation of most special characters (the quote marks will not be considered part of
+// the value). A backslash can precede a character (such as '#' or '"' or another backslash) to
+// remove its special meaning. Newline characters are not allowed in values and cannot be quoted.
 //
-// This function expects the string to be in an ASCII-compatible encoding (the "classic" locale).
-//
-// Throws service_description_exc (with service name unset) on error.
+// This function is not encoding-aware (but is UTF-8 safe); characters with special meanings
+// (#, ", whitspace characters, etc) are recognised via their ascii-equivalent code.
 //
 // Parameters:
 //    setting_val - the (current) setting value, to be modified by the call
@@ -545,8 +542,10 @@ inline string read_config_name(string_iterator &i, string_iterator end, bool env
 //    end         - iterator at end of line (not including newline character if any)
 //    part_positions - list of pair<unsigned,unsigned> to which the position of each setting value
 //                  part will be added as [start,end). May be null.
+//    delimiter   - for plus-assign, the delimiter to be inserted between the original value and
+//                  the addendum.
 // Throws:
-//   service_description_exc, std::bad_alloc, std::length_error
+//   service_description_exc (with unset service name), std::bad_alloc, std::length_error
 inline void read_setting_value(std::string &setting_val, setting_op_t operation,
         file_pos_ref input_pos, string_iterator &i, string_iterator end,
         std::list<std::pair<unsigned,unsigned>> *part_positions = nullptr,
@@ -778,7 +777,7 @@ inline uid_t parse_uid_param(file_pos_ref input_pos, const std::string &param,
     }
 
     errno = 0;
-    struct passwd * pwent = getpwnam(param.c_str());
+    struct passwd *pwent = getpwnam(param.c_str());
     if (pwent == nullptr) {
         // Maybe an error, maybe just no entry.
         if (errno == 0) {
@@ -812,7 +811,7 @@ inline uid_t parse_uid_param(file_pos_ref input_pos, const std::string &param,
 inline gid_t parse_gid_param(file_pos_ref input_pos, const std::string &param,
         ::string_view service_name, const char *setting_name)
 {
-    const char * gid_err_msg = "specified group id contains invalid numeric characters or is "
+    const char *gid_err_msg = "specified group id contains invalid numeric characters or is "
             "outside allowed range.";
 
     // Could be a name or a numeric id. But we should assume numeric first, just in case
@@ -947,7 +946,7 @@ inline unsigned long long parse_unum_param(file_pos_ref input_pos, const std::st
         const std::string &service_name,
         unsigned long long max = std::numeric_limits<unsigned long long>::max())
 {
-    const char * num_err_msg = "specified value contains invalid numeric characters or is outside "
+    const char *num_err_msg = "specified value contains invalid numeric characters or is outside "
             "allowed range.";
 
     std::size_t ind = 0;

@@ -34,36 +34,6 @@ struct dll_test_elem {
 
 lld_node<dll_test_elem> &get_node_d(dll_test_elem *e) { return e->node; }
 
-// Service listener for use in tests
-class test_listener : public service_listener
-{
-    public:
-    bool got_started = false;
-    bool got_stopped = false;
-    bool start_cancelled = false;
-    bool stop_cancelled = false;
-
-    void service_event(service_record * service, service_event_t event) noexcept override
-    {
-        switch (event) {
-        case service_event_t::STARTED:
-            got_started = true;
-            break;
-        case service_event_t::STOPPED:
-            got_stopped = true;
-            break;
-        case service_event_t::STARTCANCELLED:
-            start_cancelled = true;
-            break;
-        case service_event_t::STOPCANCELLED:
-            stop_cancelled = true;
-            break;
-        case service_event_t::FAILEDSTART:
-            break;
-        }
-    }
-};
-
 // Test the singly-linked list implementation in dinit-ll.h
 void test_sll() {
     slist<sll_test_elem, get_node> s;
@@ -235,11 +205,15 @@ void basic_test3()
     assert(s3->get_state() == service_state_t::STOPPED);
     assert(s2->get_state() == service_state_t::STOPPED);
     assert(s1->get_state() == service_state_t::STOPPED);
+    assert(s1->get_stop_reason() == stopped_reason_t::NORMAL);
+    assert(s2->get_stop_reason() == stopped_reason_t::NORMAL);
+    assert(s3->get_stop_reason() == stopped_reason_t::NORMAL);
     assert(sset.count_active_services() == 0);
 }
 
-// An explicitly activated service with automatic restart will restart if it
-// stops due to a dependency stopping, therefore also causing the dependency to restart.
+// An explicitly activated service will automatically restart if it stops due to a dependency
+// stopping (and it has an appropriate restart mode set), thereby also causing the dependency to
+// restart.
 void basic_test4()
 {
     service_set sset;
@@ -271,12 +245,15 @@ void basic_test4()
 
     // Now stop s1, which should also force s2 and s3 to stop.
     // s2 (and therefore s1) should restart:
-    s1->forced_stop();
+    s1->failed();
     sset.process_queues();
 
     assert(s3->get_state() == service_state_t::STOPPED);
     assert(s2->get_state() == service_state_t::STARTING);
     assert(s1->get_state() == service_state_t::STARTING);
+    assert(s1->get_stop_reason() == stopped_reason_t::TERMINATED);
+    assert(s2->get_stop_reason() == stopped_reason_t::DEPFAILED);
+    assert(s3->get_stop_reason() == stopped_reason_t::DEPFAILED);
 
     s1->started();
     sset.process_queues();
@@ -1131,6 +1108,7 @@ void test_softdep7()
     test_service *s1 = new test_service(&sset, "test-service-1", service_type_t::INTERNAL, {});
     service_record *s2 = new service_record(&sset, "test-service-2", service_type_t::INTERNAL, {{s1, WAITS}});
     s1->set_auto_restart(auto_restart_mode::ALWAYS);
+    s1->auto_stop = false;
     sset.add_service(s1);
     sset.add_service(s2);
 
@@ -1153,6 +1131,7 @@ void test_softdep7()
 
     // since s1 will restart, target state should be STARTED:
     assert(s1->get_target_state() == service_state_t::STARTED);
+    assert(s1->get_state() == service_state_t::STOPPING);
 
     s1->stopped();
     sset.process_queues();
@@ -1567,8 +1546,6 @@ void test_log2()
 
     log(loglevel_t::ERROR, "test two");
 
-    // flush
-    //event_loop.
     event_loop.send_fd_event(logfd, dasynq::OUT_EVENTS);
 
     assert(was_closed);
@@ -1762,6 +1739,83 @@ void test_order3()
     assert(sset.count_active_services() == 0);
 }
 
+// Test that a soft dependency doesn't interfere with stop order; if a soft dependent stops, the
+// dependency should wait for any other dependents to stop before stopping itself.
+void test_order4()
+{
+    service_set sset;
+
+    test_service *s1 = new test_service(&sset, "test-service-1", service_type_t::INTERNAL, {});
+    test_service *s2 = new test_service(&sset, "test-service-2", service_type_t::INTERNAL, {{s1, REG}});
+    test_service *s3 = new test_service(&sset, "test-service-3", service_type_t::INTERNAL, {{s2, WAITS}, {s1, WAITS}});
+    s1->auto_stop = false;
+    s2->auto_stop = false;
+    s3->auto_stop = false;
+    sset.add_service(s1);
+    sset.add_service(s2);
+    sset.add_service(s3);
+
+    // Start s3, which starts s2 and s1
+    sset.start_service(s3);
+
+    assert(s1->bring_up_reqd == true);
+    assert(s2->bring_up_reqd == false);
+    assert(s3->bring_up_reqd == false);
+
+    s1->started();
+    sset.process_queues();
+    assert(s1->get_state() == service_state_t::STARTED);
+    assert(s2->get_state() == service_state_t::STARTING);
+    assert(s3->get_state() == service_state_t::STARTING);
+    assert(s2->bring_up_reqd == true);
+    assert(s3->bring_up_reqd == false);
+
+    s2->started();
+    sset.process_queues();
+    assert(s1->get_state() == service_state_t::STARTED);
+    assert(s2->get_state() == service_state_t::STARTED);
+    assert(s3->get_state() == service_state_t::STARTING);
+    assert(s3->bring_up_reqd == true);
+
+    s3->started();
+    sset.process_queues();
+    assert(s3->get_state() == service_state_t::STARTED);
+    assert(s2->get_state() == service_state_t::STARTED);
+    assert(s1->get_state() == service_state_t::STARTED);
+
+    // Now stop s3, which should s2/s1 to stop; s1 must stop first
+    s3->stop();
+    sset.process_queues();
+    assert(s3->get_state() == service_state_t::STOPPING);
+    assert(s2->get_state() == service_state_t::STOPPING);
+    assert(s1->get_state() == service_state_t::STOPPING);
+    assert(s3->bring_down_reqd == true);
+    assert(s2->bring_down_reqd == true);
+    assert(s1->bring_down_reqd == false);
+
+    s3->stopped();
+    sset.process_queues();
+    assert(s3->get_state() == service_state_t::STOPPED);
+    assert(s2->get_state() == service_state_t::STOPPING);
+    assert(s1->get_state() == service_state_t::STOPPING);
+    assert(s2->bring_down_reqd == true);
+    assert(s1->bring_down_reqd == false);
+
+    s2->stopped();
+    sset.process_queues();
+    assert(s3->get_state() == service_state_t::STOPPED);
+    assert(s2->get_state() == service_state_t::STOPPED);
+    assert(s1->get_state() == service_state_t::STOPPING);
+    assert(s1->bring_down_reqd == true);
+
+    s1->stopped();
+    sset.process_queues();
+    assert(s3->get_state() == service_state_t::STOPPED);
+    assert(s2->get_state() == service_state_t::STOPPED);
+    assert(s1->get_state() == service_state_t::STOPPED);
+    assert(sset.count_active_services() == 0);
+}
+
 // Stopping a restarting service, which is in the stopping phase, should prevent restart
 void test_restart_stop1()
 {
@@ -1835,8 +1889,10 @@ void test_restart_stop2()
 
     // once stopped, the service should not restart
     s2->stopped();
+    sset.process_queues();
     assert(s2->get_state() == service_state_t::STOPPED);
     s1->stopped();
+    sset.process_queues();
     assert(s1->get_state() == service_state_t::STOPPED);
 }
 
@@ -1882,8 +1938,10 @@ void test_restart_stop3()
 
     // once stopped, the services should not restart
     s2->stopped();
+    sset.process_queues();
     assert(s2->get_state() == service_state_t::STOPPED);
     s1->stopped();
+    sset.process_queues();
     assert(s1->get_state() == service_state_t::STOPPED);
 }
 
@@ -1932,12 +1990,15 @@ void test_restart_stop4()
 
     // once stopped, the s2 should not restart
     s2->stopped();
+    sset.process_queues();
     assert(s2->get_state() == service_state_t::STOPPED);
 
     // When s1 stops, it should restart
     s1->stopped();
+    sset.process_queues();
     assert(s1->get_state() == service_state_t::STARTING);
     s1->started();
+    sset.process_queues();
     assert(s1->get_state() == service_state_t::STARTED);
 
     s1->stop();
@@ -1952,9 +2013,7 @@ void test_release_from_failed()
     test_service *s1 = new test_service(&sset, "test-service-1", service_type_t::INTERNAL, {});
     test_service *s2 = new test_service(&sset, "test-service-2", service_type_t::INTERNAL, {});
     test_service *s3 = new test_service(&sset, "test-service-3", service_type_t::INTERNAL, {{s1, REG}, {s2, WAITS}});
-    //s1->auto_stop = false;
     s2->start_interruptible = true;
-    //s3->auto_stop = false;
     sset.add_service(s1);
     sset.add_service(s2);
     sset.add_service(s3);
@@ -1971,6 +2030,51 @@ void test_release_from_failed()
     assert(s1->get_state() == service_state_t::STOPPED);
     assert(s2->get_state() == service_state_t::STOPPED);
     assert(s3->get_state() == service_state_t::STOPPED);
+    assert(s1->get_stop_reason() == stopped_reason_t::FAILED);
+    assert(s2->get_stop_reason() == stopped_reason_t::NORMAL);
+    assert(s3->get_stop_reason() == stopped_reason_t::DEPFAILED);
+}
+
+// Test that dependents are correctly stopped on service failure (not start failure)
+void test_service_failure()
+{
+    service_set sset;
+
+    test_service *s1 = new test_service(&sset, "test-service-1", service_type_t::INTERNAL, {});
+    test_service *s2 = new test_service(&sset, "test-service-2", service_type_t::INTERNAL, {});
+    test_service *s3 = new test_service(&sset, "test-service-3", service_type_t::INTERNAL, {{s1, REG}, {s2, WAITS}});
+
+    sset.add_service(s1);
+    sset.add_service(s2);
+    sset.add_service(s3);
+    assert(sset.find_service("test-service-1") == s1);
+    assert(sset.find_service("test-service-2") == s2);
+    assert(sset.find_service("test-service-3") == s3);
+
+    // start s3, which also starts s1/s2
+    sset.start_service(s3);
+    assert(s1->bring_up_reqd == true);
+    s1->started();
+    sset.process_queues();
+    s2->started();
+    sset.process_queues();
+    s3->started();
+    sset.process_queues();
+
+    assert(s1->get_state() == service_state_t::STARTED);
+    assert(s2->get_state() == service_state_t::STARTED);
+    assert(s3->get_state() == service_state_t::STARTED);
+
+    s1->failed();
+    sset.process_queues();
+
+    assert(s1->get_state() == service_state_t::STOPPED);
+    assert(s2->get_state() == service_state_t::STOPPED);
+    assert(s3->get_state() == service_state_t::STOPPED);
+
+    assert(s1->get_stop_reason() == stopped_reason_t::TERMINATED);
+    assert(s2->get_stop_reason() == stopped_reason_t::NORMAL);
+    assert(s3->get_stop_reason() == stopped_reason_t::DEPFAILED);
 }
 
 
@@ -2024,9 +2128,11 @@ int main(int argc, char **argv)
     RUN_TEST(test_order1, "               ");
     RUN_TEST(test_order2, "               ");
     RUN_TEST(test_order3, "               ");
+    RUN_TEST(test_order4, "               ");
     RUN_TEST(test_restart_stop1, "        ");
     RUN_TEST(test_restart_stop2, "        ");
     RUN_TEST(test_restart_stop3, "        ");
     RUN_TEST(test_restart_stop4, "        ");
     RUN_TEST(test_release_from_failed, "  ");
+    RUN_TEST(test_service_failure, "      ");
 }
